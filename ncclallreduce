@@ -1,0 +1,82 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
+#include <nccl.h>
+
+// Error checking macros
+#define CUDACHECK(cmd) do {                         \
+  cudaError_t e = cmd;                              \
+  if (e != cudaSuccess) {                           \
+    printf("Failed: Cuda error %s:%d '%s'\n",       \
+           __FILE__, __LINE__, cudaGetErrorString(e)); \
+    exit(EXIT_FAILURE);                             \
+  }                                                 \
+} while(0)
+
+#define NCCLCHECK(cmd) do {                         \
+  ncclResult_t r = cmd;                             \
+  if (r != ncclSuccess) {                           \
+    printf("Failed, NCCL error %s:%d '%s'\n",       \
+           __FILE__, __LINE__, ncclGetErrorString(r)); \
+    exit(EXIT_FAILURE);                             \
+  }                                                 \
+} while(0)
+
+int main(int argc, char* argv[]) {
+    const int nGPUs = 2;  // number of GPUs to use
+    int devs[nGPUs] = {0, 1}; // GPU IDs
+    ncclComm_t comms[nGPUs];
+
+    // Allocate device buffers
+    float* d_send[nGPUs];
+    float* d_recv[nGPUs];
+
+    cudaStream_t streams[nGPUs];
+
+    for (int i = 0; i < nGPUs; ++i) {
+        CUDACHECK(cudaSetDevice(devs[i]));
+        CUDACHECK(cudaMalloc(&d_send[i], sizeof(float)));
+        CUDACHECK(cudaMalloc(&d_recv[i], sizeof(float)));
+        CUDACHECK(cudaStreamCreate(&streams[i]));
+
+        // Initialize send buffer with a unique value per GPU
+        float value = (float)(i + 1);
+        CUDACHECK(cudaMemcpy(d_send[i], &value, sizeof(float), cudaMemcpyHostToDevice));
+    }
+
+    // Initialize NCCL
+    NCCLCHECK(ncclCommInitAll(comms, nGPUs, devs));
+
+    // Run AllReduce (sum)
+    NCCLCHECK(ncclGroupStart());
+    for (int i = 0; i < nGPUs; ++i) {
+        NCCLCHECK(ncclAllReduce((const void*)d_send[i],
+                                (void*)d_recv[i],
+                                1, ncclFloat, ncclSum,
+                                comms[i], streams[i]));
+    }
+    NCCLCHECK(ncclGroupEnd());
+
+    // Synchronize
+    for (int i = 0; i < nGPUs; ++i) {
+        CUDACHECK(cudaSetDevice(devs[i]));
+        CUDACHECK(cudaStreamSynchronize(streams[i]));
+    }
+
+    // Check results
+    for (int i = 0; i < nGPUs; ++i) {
+        float result;
+        CUDACHECK(cudaMemcpy(&result, d_recv[i], sizeof(float), cudaMemcpyDeviceToHost));
+        printf("GPU %d received result = %f\n", i, result);
+    }
+
+  
+    for (int i = 0; i < nGPUs; ++i) {
+        CUDACHECK(cudaFree(d_send[i]));
+        CUDACHECK(cudaFree(d_recv[i]));
+        ncclCommDestroy(comms[i]);
+    }
+
+    printf("Done.\n");
+    return 0;
+}
