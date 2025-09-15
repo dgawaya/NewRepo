@@ -1,0 +1,123 @@
+#include <linux/module.h>
+#include <linux/pci.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/interrupt.h>
+#include <linux/dma-mapping.h>
+
+#define DRV_NAME "mynic"
+#define DRV_VERSION "0.1"
+
+struct mynic_priv {
+    void __iomem *mmio_base;
+    struct net_device *netdev;
+    struct pci_dev *pdev;
+    // add TX/RX ring structs later
+};
+
+/* -------- Netdev ops -------- */
+
+static netdev_tx_t mynic_start_xmit(struct sk_buff *skb, struct net_device *ndev)
+{
+    struct mynic_priv *priv = netdev_priv(ndev);
+
+    /* For now, just drop the packet and count it */
+    dev_kfree_skb(skb);
+    netdev_info(ndev, "xmit called\n");
+
+    return NETDEV_TX_OK;
+}
+
+static int mynic_open(struct net_device *ndev)
+{
+    netif_start_queue(ndev);
+    netdev_info(ndev, "device opened\n");
+    return 0;
+}
+
+static int mynic_stop(struct net_device *ndev)
+{
+    netif_stop_queue(ndev);
+    netdev_info(ndev, "device stopped\n");
+    return 0;
+}
+
+static const struct net_device_ops mynic_netdev_ops = {
+    .ndo_open       = mynic_open,
+    .ndo_stop       = mynic_stop,
+    .ndo_start_xmit = mynic_start_xmit,
+};
+
+/* -------- PCI driver -------- */
+
+static int mynic_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+{
+    struct net_device *ndev;
+    struct mynic_priv *priv;
+    int err;
+
+    err = pci_enable_device(pdev);
+    if (err)
+        return err;
+
+    pci_set_master(pdev);
+
+    ndev = alloc_etherdev(sizeof(struct mynic_priv));
+    if (!ndev) {
+        pci_disable_device(pdev);
+        return -ENOMEM;
+    }
+
+    priv = netdev_priv(ndev);
+    priv->pdev = pdev;
+    priv->netdev = ndev;
+
+    ndev->netdev_ops = &mynic_netdev_ops;
+    ndev->min_mtu = 68;
+    ndev->max_mtu = 1500;
+
+    /* Fake MAC for now */
+    eth_hw_addr_random(ndev);
+
+    pci_set_drvdata(pdev, ndev);
+
+    err = register_netdev(ndev);
+    if (err) {
+        free_netdev(ndev);
+        pci_disable_device(pdev);
+        return err;
+    }
+
+    dev_info(&pdev->dev, "MyNIC device registered\n");
+    return 0;
+}
+
+static void mynic_remove(struct pci_dev *pdev)
+{
+    struct net_device *ndev = pci_get_drvdata(pdev);
+
+    unregister_netdev(ndev);
+    free_netdev(ndev);
+    pci_disable_device(pdev);
+    dev_info(&pdev->dev, "MyNIC device removed\n");
+}
+
+static const struct pci_device_id mynic_pci_ids[] = {
+    { PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x100e) }, /* Example: e1000 */
+    { 0, }
+};
+MODULE_DEVICE_TABLE(pci, mynic_pci_ids);
+
+static struct pci_driver mynic_pci_driver = {
+    .name     = DRV_NAME,
+    .id_table = mynic_pci_ids,
+    .probe    = mynic_probe,
+    .remove   = mynic_remove,
+};
+
+module_pci_driver(mynic_pci_driver);
+
+MODULE_AUTHOR("Your Name");
+MODULE_DESCRIPTION("MyNIC skeleton network driver");
+MODULE_LICENSE("GPL");
+MODULE_VERSION(DRV_VERSION);
